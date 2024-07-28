@@ -1,81 +1,71 @@
-import cv2
-import numpy as np
-import os
-import matplotlib.pyplot as plt
-
+import torch
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 from PIL import Image
-from IPython.display import display
+from ultralytics import YOLO
+import numpy as np
+import gdown
+import os
 
-import warnings
-warnings.filterwarnings("ignore")
-
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
-
-def preprocess(img_array):
-    gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
-    noise_filter = cv2.bilateralFilter(gray, 10, 15, 15)
-    return noise_filter
-
-def ocr(img_array):
-    preprocessed_image = preprocess(img_array)
-
-    # Convert numpy array to PIL Image
-    image = Image.fromarray(preprocessed_image)
-
-    # To RGB
-    image = image.convert("RGB")
-
-    # Initialisation
-    processor = TrOCRProcessor.from_pretrained('microsoft/trocr-base-printed')
-    model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-base-printed')
-
-    # Preprocessing
-    pixel_values = processor(images=image, return_tensors="pt").pixel_values
-
-    # Text generation
-    generated_ids = model.generate(pixel_values, max_new_tokens=50)
-
-    # Text decode
-    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    return generated_text
+def crop_plate(img_path):
+    model_path = './Detection/runs/detect/train/weights/best.pt' 
+    model = YOLO(model_path)
+    image = Image.open(img_path)
+    results = model(img_path)
     
-if __name__ == '__main__':
+    for res in results:
+        for box in res.boxes:
+            confidence = box.conf[0].item()  # Get confidence score
+            if confidence >= 0.7:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])  # Get bounding box coordinates
+                cropped_image = image.crop((x1, y1, x2, y2))  # Crop the region
+                cropped_array = np.array(cropped_image)  # Convert to numpy array
+                return cropped_array
+    return None  # Возврат None, если номерные знаки не найдены
 
-    #path = './cleared_cropped_plates'
-    path = './test_img/AI6392HM.jpg'
-    text = ocr(path)
-    print(text)
 
-    ''' count = 0
-        correct = 0
-        correct_digits = 0
+def download_model_from_google_drive(file_id, destination_path):
+    url = f'https://drive.google.com/uc?id={file_id}'
+    gdown.download(url, destination_path, quiet=False)
 
-        results =[]
-        for file in os.listdir(path)[50:70]:
 
-            count += 1
+def ocr(img_path):
+    # Загрузка модели и процессора TrOCR
+    model_path = "./OCR/results/trocr-finetuned"
 
-            file_path = os.path.join(path, file)
+    try:
+        processor = TrOCRProcessor.from_pretrained(model_path)
+        model = VisionEncoderDecoderModel.from_pretrained(model_path)
+    except OSError:
+        ocr_model_id = '1g_9QaTWuIqa7-fdp4r5Bqx_UoGuJnqKA'
+        ocr_model_path = './OCR/results/trocr-finetuned'
 
-            true = file[:-4]
-            predict = str(ocr(file_path)).replace(" ", "")[-8:]
-            digits = predict[2:-2]
-
-            if true == predict:
-                correct += 1
-                comparison = 'True'
-            elif digits == file[2:6]:
-                correct_digits += 1 
-                comparison = 'Partial'
-            else:
-                comparison = 'False'
-
-            results.append(f'True {true}, predicted {predict}           {comparison}')
+        download_model_from_google_drive(ocr_model_id, ocr_model_path)
         
-        for r in results:
-            print(r)
+        processor = TrOCRProcessor.from_pretrained(model_path)
+        model = VisionEncoderDecoderModel.from_pretrained(model_path)
 
-        print(f'Correct predictions {correct} out of {count} - {correct / count} rate')
-        print(f'Correct digits predictions {correct + correct_digits} out of {count} - {(correct + correct_digits) / count} rate')'''
+
+    # Вызов функции для обрезки номерного знака
+    cropped_image_array = crop_plate(img_path)
+    
+    if cropped_image_array is None:
+        return "No license plate detected"
+
+    # Преобразование обрезанного массива numpy обратно в изображение PIL
+    cropped_image = Image.fromarray(cropped_image_array)
+
+    # Предобработка изображения для модели
+    pixel_values = processor(images=cropped_image, return_tensors="pt").pixel_values
+
+    # Генерация текста
+    with torch.no_grad():
+        generated_ids = model.generate(pixel_values)
+
+    # Декодирование сгенерированного текста
+    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    
+    return generated_text
+
+# Пример использования:
+img_path = "./test_img/BK1560II.jpg"  # Замените на путь к вашему изображению
+print(ocr(img_path))
